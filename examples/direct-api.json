@@ -1,0 +1,15 @@
+{
+  "provider": "api",
+  "api_url": "https://api.openai.com/v1",
+  "api_key": "",
+  "api_key_env": "OPENAI_API_KEY",
+  "model": "gpt-5.3-codex",
+  "api_format": "responses",
+  "api_timeout_seconds": 180,
+  "max_diff_chars": 120000,
+  "language": "zh-CN",
+  "exclude": [
+    "generated/**"
+  ],
+  "prompt_file": ""
+}

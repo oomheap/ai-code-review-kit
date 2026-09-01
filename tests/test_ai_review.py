@@ -3,7 +3,9 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
@@ -60,6 +62,44 @@ class RepositoryTestCase(unittest.TestCase):
             encoding="utf-8",
         )
         return config
+
+    def api_server(self, response_payload, status=200, response_headers=None):
+        requests = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                raw_body = self.rfile.read(length)
+                requests.append(
+                    {
+                        "path": self.path,
+                        "authorization": self.headers.get("Authorization"),
+                        "body": json.loads(raw_body.decode("utf-8")),
+                    }
+                )
+                body = json.dumps(response_payload).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                for name, value in (response_headers or {}).items():
+                    self.send_header(name, value)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format, *_args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def cleanup():
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.addCleanup(cleanup)
+        return f"http://127.0.0.1:{server.server_port}/v1", requests
 
     def test_working_scope_includes_untracked_and_redacts_secrets(self):
         (self.repo / "app.py").write_text(
@@ -171,6 +211,106 @@ class RepositoryTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("AI 审查结论: 通过", result.stderr)
         self.assertIn("AI 未发现", result.stderr)
+
+    def test_direct_responses_api_can_run_pre_commit_gate(self):
+        review_json = '{"summary":"API 通过","findings":[]}'
+        response = {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": review_json}],
+                }
+            ]
+        }
+        api_url, requests = self.api_server(response)
+        config = self.repo / "api-runner.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "provider": "api",
+                    "api_url": api_url,
+                    "api_key_env": "AI_REVIEW_TEST_API_KEY",
+                    "model": "test-review-model",
+                    "api_format": "responses",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.repo / "app.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+        self.git("add", "app.py")
+        environment = os.environ.copy()
+        environment["AI_REVIEW_TEST_API_KEY"] = "test-key-value"
+
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), str(self.repo), "--config", str(config), "--hook", "pre-commit"],
+            cwd=self.repo,
+            env=environment,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("API 通过", result.stderr)
+        self.assertEqual(requests[0]["path"], "/v1/responses")
+        self.assertEqual(requests[0]["authorization"], "Bearer test-key-value")
+        self.assertEqual(requests[0]["body"]["model"], "test-review-model")
+        self.assertFalse(requests[0]["body"]["store"])
+        self.assertIn("<untrusted_diff>", requests[0]["body"]["input"])
+
+    def test_direct_chat_completions_api_supports_manual_review(self):
+        api_url, requests = self.api_server(
+            {"choices": [{"message": {"role": "assistant", "content": "chat review ok"}}]}
+        )
+        config = self.repo / "chat-runner.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "provider": "api",
+                    "api_url": api_url,
+                    "api_key_env": "",
+                    "model": "compatible-model",
+                    "api_format": "chat_completions",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.repo / "app.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+
+        result = self.cli("--config", str(config))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "chat review ok")
+        self.assertEqual(requests[0]["path"], "/v1/chat/completions")
+        self.assertIsNone(requests[0]["authorization"])
+        self.assertEqual(requests[0]["body"]["model"], "compatible-model")
+
+    def test_direct_api_refuses_http_redirects(self):
+        api_url, requests = self.api_server(
+            {"error": "redirected"},
+            status=302,
+            response_headers={"Location": "/credential-target"},
+        )
+        config = self.repo / "redirect-runner.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "provider": "api",
+                    "api_url": api_url,
+                    "api_key_env": "",
+                    "model": "compatible-model",
+                    "api_format": "responses",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.repo / "app.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+
+        result = self.cli("--config", str(config))
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("HTTP 302", result.stderr)
+        self.assertEqual(len(requests), 1)
 
     def test_pre_commit_gate_fails_closed_for_malformed_ai_output(self):
         (self.repo / "app.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
@@ -351,6 +491,42 @@ class UnitTestCase(unittest.TestCase):
     def test_default_config_is_valid(self):
         config = json.loads((ROOT / "config" / "default.json").read_text(encoding="utf-8"))
         ai_review.validate_config(config)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits are not authoritative on Windows")
+    def test_config_with_inline_api_key_requires_private_permissions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = Path(temporary) / "api.json"
+            config_path.write_text(
+                json.dumps({"provider": "api", "api_key": "x", "model": "test-model"}),
+                encoding="utf-8",
+            )
+            config_path.chmod(0o644)
+
+            with self.assertRaises(ai_review.ReviewError):
+                ai_review.load_config(None, str(config_path))
+
+            config_path.chmod(0o600)
+            config = ai_review.load_config(None, str(config_path))
+
+        self.assertEqual(config["api_key"], "x")
+
+    def test_remote_plain_http_api_is_rejected(self):
+        config = ai_review.load_config(None, None)
+        config["provider"] = "api"
+        config["api_url"] = "http://example.com/v1"
+        config["model"] = "test-model"
+
+        with self.assertRaises(ai_review.ReviewError):
+            ai_review.validate_config(config)
+
+    def test_malformed_api_url_is_rejected_as_review_error(self):
+        config = ai_review.load_config(None, None)
+        config["provider"] = "api"
+        config["api_url"] = "https://[malformed"
+        config["model"] = "test-model"
+
+        with self.assertRaises(ai_review.ReviewError):
+            ai_review.validate_config(config)
 
     def test_structured_findings_are_normalized_and_sorted(self):
         result = ai_review.parse_gate_review(

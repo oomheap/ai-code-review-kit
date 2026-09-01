@@ -16,7 +16,7 @@ GITHUB_TOKEN=github_pat_test_123 \
 
 test -x "$TEST_ROOT/bin files/ai-review"
 test -f "$TEST_ROOT/bin files/ai-review-data/prompts/review.md"
-"$TEST_ROOT/bin files/ai-review" --version | grep 'ai-review 1.1.0' >/dev/null
+"$TEST_ROOT/bin files/ai-review" --version | grep 'ai-review 1.2.0' >/dev/null
 
 PATH="$SCRIPT_DIR/tests/fixtures:$PATH" \
 AI_REVIEW_TEST_SOURCE="$SCRIPT_DIR" \

@@ -223,6 +223,32 @@ ai-review --provider codex --install-hooks
 
 第二条命令会把本次明确指定的 `--provider codex` 固化到生成的 hooks 中。若省略 `--provider`，hooks 每次按用户配置的 `provider` 选择执行器。
 
+Codex CLI 本身支持三类常用配置：
+
+1. `codex login`：使用 ChatGPT 账号和订阅权益；
+2. `codex login --with-api-key`：使用 OpenAI Platform API Key，按 API 用量计费；
+3. `~/.codex/config.toml`：配置自定义 Responses API provider、API URL、环境变量名和模型。
+
+Codex 自定义 provider 示例：
+
+```toml
+model = "<model-name>"
+model_provider = "review_api"
+
+[model_providers.review_api]
+name = "Review API"
+base_url = "https://your-api.example.com/v1"
+env_key = "REVIEW_API_KEY"
+wire_api = "responses"
+```
+
+```sh
+export REVIEW_API_KEY="..."
+codex exec --model "<model-name>" "只回答 OK"
+```
+
+根据 [OpenAI Codex 配置参考](https://developers.openai.com/codex/config-reference)，Codex 自定义 provider 的 `wire_api` 当前只支持 `responses`。如果服务只兼容 `/chat/completions`，请使用下面工具内置的直连 API 模式。
+
 如需为代码审查固定某个账号已支持的模型，可把 Codex 当作自定义命令配置：
 
 ```json
@@ -235,7 +261,64 @@ ai-review --provider codex --install-hooks
 }
 ```
 
-### 方案二：其他 AI CLI
+### 方案二：直接配置 API Key、API URL 和 Model
+
+此方式不依赖 Codex CLI，仅使用 Python 标准库调用 OpenAI Responses API 或 OpenAI-compatible Chat Completions。
+
+推荐把 Key 放入环境变量。macOS/Linux 用户级配置 `~/.config/ai-code-review/config.json`：
+
+```json
+{
+  "provider": "api",
+  "api_url": "https://api.openai.com/v1",
+  "api_key_env": "OPENAI_API_KEY",
+  "api_key": "",
+  "model": "gpt-5.3-codex",
+  "api_format": "responses",
+  "api_timeout_seconds": 180
+}
+```
+
+```sh
+export OPENAI_API_KEY="..."
+ai-review --doctor
+ai-review --scope staged
+ai-review --install-hooks
+```
+
+Windows 用户配置路径为 `%APPDATA%\AiCodeReview\config.json`，环境变量可写入当前用户环境：
+
+```powershell
+[Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "...", "User")
+```
+
+重新打开终端或 IDE 后运行 `ai-review --doctor`。
+
+兼容 `/chat/completions` 的服务使用：
+
+```json
+{
+  "provider": "api",
+  "api_url": "https://your-api.example.com/v1",
+  "api_key_env": "YOUR_API_KEY",
+  "api_key": "",
+  "model": "your-model-name",
+  "api_format": "chat_completions",
+  "api_timeout_seconds": 180
+}
+```
+
+`api_url` 可以是 `/v1` 基础地址，也可以是完整的 `/responses` 或 `/chat/completions` 地址，工具会避免重复追加路径。远程服务必须使用 HTTPS；为 Ollama、LM Studio 或本地代理保留了 `http://localhost`、`127.0.0.1` 和 `::1`。
+
+也可以直接在 JSON 中填写 `"api_key": "..."`。不推荐这样做；如果确实使用，macOS/Linux 配置文件必须设置为仅当前用户可读，否则工具拒绝加载：
+
+```sh
+chmod 600 ~/.config/ai-code-review/config.json
+```
+
+`api_key_env` 对应的环境变量优先于 `api_key`。不要把 Key 写入仓库的 `.ai-review.json`。完整示例见 [examples/direct-api.json](examples/direct-api.json)。
+
+### 方案三：其他 AI CLI
 
 其他 AI CLI 必须能从标准输入接收完整提示，并把最终回答写到标准输出。把它配置为参数数组，工具不会通过 shell 拼接命令：
 
@@ -256,7 +339,7 @@ ai-review --config /path/to/review-config.json --install-hooks
 
 显式配置文件的绝对路径会写入 hooks，后续 commit/push 无需重复传参。
 
-### 方案三：任意网页 AI
+### 方案四：任意网页 AI
 
 如果没有本地 AI CLI，可以只生成经过过滤的审查提示，再上传到 ChatGPT、Claude 或其他服务：
 
@@ -353,7 +436,7 @@ ai-review --prompt-only --output review-prompt.md
 ai-review /path/to/repository
 ```
 
-默认 `provider=auto` 的选择顺序为：配置的自定义命令、Codex CLI、输出提示。若要强制使用 Codex：
+默认 `provider=auto` 的选择顺序为：配置的自定义命令、已配置 model 的直连 API、Codex CLI、输出提示。若要强制使用 Codex：
 
 ```sh
 ai-review --provider codex
@@ -386,8 +469,14 @@ ai-review --provider codex
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `provider` | 字符串 | `auto` | `auto`、`codex`、`command` 或 `prompt` |
+| `provider` | 字符串 | `auto` | `auto`、`api`、`codex`、`command` 或 `prompt` |
 | `command` | 字符串数组 | `[]` | 自定义 AI CLI 及参数；提示从标准输入传入 |
+| `api_url` | 字符串 | `https://api.openai.com/v1` | API 基础地址或完整 endpoint；远程必须 HTTPS |
+| `api_key_env` | 字符串 | `OPENAI_API_KEY` | 保存 API Key 的环境变量名 |
+| `api_key` | 字符串 | 空 | 直接保存的 API Key；不推荐，POSIX 文件权限必须为 600 |
+| `model` | 字符串 | 空 | 直连 API 使用的模型 ID；`provider=api` 时必填 |
+| `api_format` | 字符串 | `responses` | `responses` 或 `chat_completions` |
+| `api_timeout_seconds` | 整数 | `180` | API 请求超时，范围 5–600 秒 |
 | `max_diff_chars` | 整数 | `120000` | 最多进入提示的 diff 字符数，范围 1000–2000000 |
 | `language` | 字符串 | `zh-CN` | 要求 AI 使用的输出语言 |
 | `exclude` | 字符串数组 | `[]` | 追加的仓库相对 glob 排除规则 |
@@ -399,6 +488,12 @@ ai-review --provider codex
 {
   "provider": "auto",
   "command": [],
+  "api_url": "https://api.openai.com/v1",
+  "api_key": "",
+  "api_key_env": "OPENAI_API_KEY",
+  "model": "",
+  "api_format": "responses",
+  "api_timeout_seconds": 180,
   "max_diff_chars": 120000,
   "language": "zh-CN",
   "exclude": ["generated/**", "fixtures/large/**"],
@@ -406,7 +501,7 @@ ai-review --provider codex
 }
 ```
 
-默认配置见 [config/default.json](config/default.json)，自定义执行器完整示例见 [examples/custom-command.json](examples/custom-command.json)。
+默认配置见 [config/default.json](config/default.json)，直连 API 示例见 [examples/direct-api.json](examples/direct-api.json)，自定义执行器示例见 [examples/custom-command.json](examples/custom-command.json)。
 
 加载可信项目配置：
 
@@ -433,6 +528,8 @@ ai-review --config /path/to/review-config.json
 - diff 中形如 `password=...`、`api_key=...` 的值及常见令牌形态会替换为 `<REDACTED>`；
 - 默认最多发送 120,000 个 diff 字符，超过部分带标记截断；
 - Codex 在 `read-only` 沙箱中运行，自定义命令使用 `shell=False` 等价行为；
+- 直连 API 在附加凭据前校验 URL：远程强制 HTTPS、禁止 URL 用户信息和跨地址重定向，并限制响应大小；
+- API Key 默认从环境变量读取；JSON 内联 Key 在 POSIX 上要求配置权限为 600，且错误响应会再次脱敏；
 - 仓库内 `.ai-review.json` 默认不加载，防止不可信代码指定本地执行命令；
 - 提示模板明确把 diff 标记为不可信数据，降低代码注释中的提示注入风险。
 - 门禁只接受单个结构化 JSON 对象，格式错误和 AI 调用错误默认阻断；

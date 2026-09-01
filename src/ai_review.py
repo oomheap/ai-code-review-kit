@@ -15,12 +15,15 @@ import stat
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 MIN_PYTHON = (3, 9)
 DEFAULT_MAX_DIFF_CHARS = 120_000
 MAX_AI_OUTPUT_CHARS = 2_000_000
@@ -30,6 +33,7 @@ HOOK_BACKUP_SUFFIX = ".ai-review-original"
 ZERO_OID = re.compile(r"^0+$")
 GIT_OID = re.compile(r"^[0-9a-fA-F]{40,64}$")
 SEVERITIES = ("P0", "P1", "P2", "P3")
+ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 GATE_OUTPUT_CONTRACT = """
 
@@ -538,6 +542,15 @@ def read_json(path: Path) -> Dict[str, Any]:
         raise ReviewError(f"无法读取配置 {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise ReviewError(f"配置必须是 JSON 对象: {path}")
+    if data.get("api_key") and os.name != "nt":
+        try:
+            permissions = stat.S_IMODE(path.stat().st_mode)
+        except OSError as exc:
+            raise ReviewError(f"无法检查配置权限 {path}: {exc}") from exc
+        if permissions & (stat.S_IRWXG | stat.S_IRWXO):
+            raise ReviewError(
+                f"配置 {path} 包含 api_key，权限必须为 600；建议改用 api_key_env"
+            )
     return data
 
 
@@ -565,6 +578,12 @@ def load_config(
         "language": "zh-CN",
         "exclude": [],
         "prompt_file": "",
+        "api_url": "https://api.openai.com/v1",
+        "api_key": "",
+        "api_key_env": "OPENAI_API_KEY",
+        "model": "",
+        "api_format": "responses",
+        "api_timeout_seconds": 180,
     }
     paths = default_config_paths(repo, trust_project)
     if explicit_path:
@@ -583,10 +602,54 @@ def validate_string_list(config: Dict[str, Any], key: str) -> None:
         raise ReviewError(f"配置项 {key} 必须是非空字符串数组")
 
 
+def is_loopback_host(host: str) -> bool:
+    """Return whether a normalized hostname is local-only."""
+    return host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".localhost")
+
+
+def parsed_api_url(value: Any) -> urllib.parse.ParseResult:
+    """Validate an API base/endpoint URL before any credential is attached."""
+    if not isinstance(value, str) or not value.strip():
+        raise ReviewError("配置项 api_url 必须是非空 URL")
+    if any(character in value for character in "\r\n\0"):
+        raise ReviewError("api_url 不能包含控制字符")
+    try:
+        parsed = urllib.parse.urlparse(value.strip())
+        host = (parsed.hostname or "").lower()
+    except ValueError as exc:
+        raise ReviewError("配置项 api_url 不是有效 URL") from exc
+    if parsed.username or parsed.password or parsed.fragment:
+        raise ReviewError("api_url 不能包含用户信息或 fragment")
+    if parsed.scheme != "https" and not (parsed.scheme == "http" and is_loopback_host(host)):
+        raise ReviewError("api_url 必须使用 HTTPS；仅 localhost 允许 HTTP")
+    if not host:
+        raise ReviewError("api_url 缺少有效主机名")
+    return parsed
+
+
+def validate_api_config(config: Dict[str, Any]) -> None:
+    """Validate direct API settings independently from common settings."""
+    parsed_api_url(config.get("api_url"))
+    for key in ("api_key", "api_key_env", "model"):
+        if not isinstance(config.get(key), str):
+            raise ReviewError(f"配置项 {key} 必须是字符串")
+    if config["api_key"] and any(character in config["api_key"] for character in "\r\n"):
+        raise ReviewError("配置项 api_key 不能包含换行")
+    if config["api_key_env"] and not ENV_NAME.fullmatch(config["api_key_env"]):
+        raise ReviewError("配置项 api_key_env 不是有效的环境变量名")
+    if config.get("provider") == "api" and not config["model"].strip():
+        raise ReviewError("provider=api 时必须配置 model")
+    if config.get("api_format") not in {"responses", "chat_completions"}:
+        raise ReviewError("配置项 api_format 必须是 responses 或 chat_completions")
+    timeout = config.get("api_timeout_seconds")
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 5 <= timeout <= 600:
+        raise ReviewError("配置项 api_timeout_seconds 必须是 5 到 600 之间的整数")
+
+
 def validate_config(config: Dict[str, Any]) -> None:
     """Validate supported configuration values."""
-    if config.get("provider") not in {"auto", "codex", "command", "prompt"}:
-        raise ReviewError("配置项 provider 必须是 auto、codex、command 或 prompt")
+    if config.get("provider") not in {"auto", "api", "codex", "command", "prompt"}:
+        raise ReviewError("配置项 provider 必须是 auto、api、codex、command 或 prompt")
     validate_string_list(config, "command") if config.get("command") else None
     validate_string_list(config, "exclude") if config.get("exclude") else None
     limit = config.get("max_diff_chars")
@@ -596,6 +659,7 @@ def validate_config(config: Dict[str, Any]) -> None:
         raise ReviewError("配置项 language 必须是非空字符串")
     if not isinstance(config.get("prompt_file"), str):
         raise ReviewError("配置项 prompt_file 必须是字符串")
+    validate_api_config(config)
 
 
 def prompt_candidates() -> List[Path]:
@@ -715,15 +779,170 @@ def prepare_push_payload(
     return finalize_payload(source, args.max_chars, config)
 
 
+def api_endpoint(config: Dict[str, Any]) -> str:
+    """Resolve a base URL or already-complete compatible endpoint."""
+    parsed = parsed_api_url(config["api_url"])
+    suffix = "/responses" if config["api_format"] == "responses" else "/chat/completions"
+    path = parsed.path.rstrip("/")
+    if not path.endswith(suffix):
+        path += suffix
+    return urllib.parse.urlunparse(parsed._replace(path=path, fragment=""))
+
+
+def api_key(config: Dict[str, Any]) -> str:
+    """Resolve an API key from the configured environment variable, then config."""
+    environment_name = config["api_key_env"]
+    value = os.environ.get(environment_name, "") if environment_name else ""
+    if not value:
+        value = config["api_key"]
+    if any(character in value for character in "\r\n"):
+        raise ReviewError("API key 不能包含换行")
+    return value
+
+
+def api_credentials_ready(config: Dict[str, Any]) -> Tuple[bool, str]:
+    """Report whether a direct API request has sufficient credentials."""
+    if api_key(config):
+        source = config["api_key_env"] if os.environ.get(config["api_key_env"], "") else "api_key"
+        return True, f"model={config['model']}, key={source}"
+    host = (parsed_api_url(config["api_url"]).hostname or "").lower()
+    if is_loopback_host(host):
+        return True, f"model={config['model']}, local endpoint without key"
+    return False, f"未设置 {config['api_key_env'] or 'api_key'}"
+
+
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Prevent bearer credentials from following redirects to another host."""
+
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        return None
+
+
+def api_request_body(config: Dict[str, Any], prompt: str) -> Dict[str, Any]:
+    """Build a non-streaming request for a supported OpenAI-compatible API."""
+    if config["api_format"] == "responses":
+        return {
+            "model": config["model"],
+            "input": prompt,
+            "store": False,
+        }
+    return {
+        "model": config["model"],
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+    }
+
+
+def response_item_text(item: Any) -> List[str]:
+    """Extract output_text values from one Responses output item."""
+    if not isinstance(item, dict) or not isinstance(item.get("content"), list):
+        return []
+    parts: List[str] = []
+    for content in item["content"]:
+        if isinstance(content, dict) and content.get("type") == "output_text":
+            text_value = content.get("text")
+            if isinstance(text_value, str):
+                parts.append(text_value)
+    return parts
+
+
+def responses_output_text(data: Dict[str, Any]) -> str:
+    """Extract text from an OpenAI Responses API response object."""
+    direct = data.get("output_text")
+    if isinstance(direct, str) and direct:
+        return direct
+    parts: List[str] = []
+    output = data.get("output")
+    if isinstance(output, list):
+        for item in output:
+            parts.extend(response_item_text(item))
+    return "\n".join(parts)
+
+
+def chat_output_text(data: Dict[str, Any]) -> str:
+    """Extract assistant text from an OpenAI-compatible chat response."""
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return ""
+    message = choices[0].get("message")
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            item["text"]
+            for item in content
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        )
+    return ""
+
+
+def parse_api_response(raw: bytes, api_format: str) -> str:
+    """Decode a bounded API response and return its assistant text."""
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReviewError("API 返回内容不是有效的 UTF-8 JSON") from exc
+    if not isinstance(data, dict):
+        raise ReviewError("API 返回 JSON 必须是对象")
+    text = responses_output_text(data) if api_format == "responses" else chat_output_text(data)
+    if not text.strip():
+        raise ReviewError("API 返回中没有可用的模型文本")
+    return text
+
+
+def safe_api_error(raw: bytes) -> str:
+    """Create a bounded, redacted error detail from an HTTP response."""
+    detail = raw.decode("utf-8", errors="replace")[:2000]
+    detail, _ = redact_secrets(detail)
+    return safe_terminal_text(detail).strip()
+
+
+def call_api(config: Dict[str, Any], prompt: str) -> str:
+    """Call a direct OpenAI-compatible API without third-party dependencies."""
+    credentials_ok, credentials_detail = api_credentials_ready(config)
+    if not credentials_ok:
+        raise ReviewError(f"API 凭据未就绪: {credentials_detail}")
+    payload = json.dumps(api_request_body(config, prompt), ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": f"ai-code-review-kit/{VERSION}",
+    }
+    key = api_key(config)
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    outbound = urllib.request.Request(api_endpoint(config), data=payload, headers=headers, method="POST")
+    opener = urllib.request.build_opener(NoRedirectHandler())
+    try:
+        with opener.open(outbound, timeout=config["api_timeout_seconds"]) as response:
+            raw = response.read(MAX_AI_OUTPUT_CHARS + 1)
+    except urllib.error.HTTPError as exc:
+        detail = safe_api_error(exc.read(2001))
+        suffix = f": {detail}" if detail else ""
+        raise ReviewError(f"API 请求失败，HTTP {exc.code}{suffix}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise ReviewError(f"API 请求失败: {safe_terminal_text(str(exc))}") from exc
+    if len(raw) > MAX_AI_OUTPUT_CHARS:
+        raise ReviewError("API 返回超过安全长度上限")
+    return parse_api_response(raw, config["api_format"])
+
+
 def choose_provider(requested: Optional[str], prompt_only: bool, config: Dict[str, Any]) -> str:
     """Choose an available runner with a safe prompt-only fallback."""
     if prompt_only:
         return "prompt"
     provider = requested or config["provider"]
     if provider != "auto":
+        if provider == "api" and not config["model"].strip():
+            raise ReviewError("provider=api 时必须配置 model")
         return provider
     if config["command"]:
         return "command"
+    if config["model"]:
+        return "api"
     if shutil.which("codex"):
         return "codex"
     return "prompt"
@@ -763,6 +982,9 @@ def execute_provider(request: ExecutionRequest, payload: ReviewPayload) -> int:
             print("未检测到 AI CLI，已回退为输出审查提示。", file=sys.stderr)
         write_result(payload.prompt, request.output)
         return 0
+    if request.provider == "api":
+        write_result(call_api(request.config, payload.prompt), request.output)
+        return 0
     command = provider_command(request.provider, request.config, request.repo)
     result = run_command(command, request.repo, input_text=payload.prompt)
     if result.stderr:
@@ -776,8 +998,10 @@ def capture_provider(request: ExecutionRequest, prompt: str) -> str:
     """Run an AI provider for a gate and require a successful textual result."""
     if request.provider == "prompt":
         raise ReviewError(
-            "Git 门禁必须配置可执行的 AI：请安装并登录 Codex CLI，或配置 provider=command"
+            "Git 门禁必须配置 AI：请使用 provider=api，或安装 Codex CLI/配置 command"
         )
+    if request.provider == "api":
+        return call_api(request.config, prompt)
     command = provider_command(request.provider, request.config, request.repo)
     result = run_command(command, request.repo, input_text=prompt)
     if result.stderr:
@@ -1161,6 +1385,27 @@ def run_hook(repo: Path, args: argparse.Namespace, config: Dict[str, Any]) -> in
     return run_gate(repo, payload, provider, config)
 
 
+def provider_doctor_status(config: Dict[str, Any]) -> Tuple[bool, str]:
+    """Describe the effective provider without making a paid API request."""
+    effective_provider = choose_provider(None, False, config)
+    if effective_provider == "api":
+        provider_ok, detail = api_credentials_ready(config)
+        return provider_ok, f"api, {detail}"
+    if effective_provider == "prompt":
+        return False, "未配置，手动模式只能输出提示"
+    return True, effective_provider
+
+
+def hooks_doctor_status(repo: Path) -> Tuple[bool, str]:
+    """Describe which managed hooks are installed in a repository."""
+    try:
+        hooks_dir = hooks_directory(repo)
+        installed = [name for name in selected_hooks("all") if is_managed_hook(hooks_dir / name)]
+    except ReviewError as exc:
+        return False, str(exc)
+    return len(installed) == 2, ", ".join(installed) if installed else "未安装"
+
+
 def doctor(path: Path, config_path: Optional[str], trust_project: bool) -> int:
     """Report dependencies and whether the target path is reviewable."""
     checks: List[Tuple[str, bool, str]] = []
@@ -1179,23 +1424,16 @@ def doctor(path: Path, config_path: Optional[str], trust_project: bool) -> int:
         config_ok = config_path is None
     checks.append(("Git 仓库", repo is not None, repo_detail))
     checks.append(("配置", config_ok, f"provider={config['provider']}"))
-    effective_provider = choose_provider(None, False, config)
+    provider_ok, provider_detail = provider_doctor_status(config)
     checks.append(
         (
             "AI 执行器（门禁必需）",
-            effective_provider != "prompt",
-            effective_provider if effective_provider != "prompt" else "未配置，手动模式只能输出提示",
+            provider_ok,
+            provider_detail,
         )
     )
     if repo is not None:
-        try:
-            hooks_dir = hooks_directory(repo)
-            installed = [name for name in selected_hooks("all") if is_managed_hook(hooks_dir / name)]
-            hooks_ok = len(installed) == 2
-            hooks_detail = ", ".join(installed) if installed else "未安装"
-        except ReviewError as exc:
-            hooks_ok = False
-            hooks_detail = str(exc)
+        hooks_ok, hooks_detail = hooks_doctor_status(repo)
         checks.append(("Git AI 门禁", hooks_ok, hooks_detail))
     for name, ok, detail in checks:
         print(f"[{'OK' if ok else '--'}] {name}: {detail}")
@@ -1209,7 +1447,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("path", nargs="?", default=".", help="Git 仓库内路径（默认当前目录）")
     parser.add_argument("--scope", choices=("working", "staged", "commit", "base"), default="working")
     parser.add_argument("--ref", help="commit 提交或 base 分支/提交")
-    parser.add_argument("--provider", choices=("auto", "codex", "command", "prompt"))
+    parser.add_argument("--provider", choices=("auto", "api", "codex", "command", "prompt"))
     parser.add_argument("--config", help="额外 JSON 配置文件")
     parser.add_argument(
         "--trust-project-config",
