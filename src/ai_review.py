@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import fnmatch
+import getpass
 import json
 import os
 import re
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 MIN_PYTHON = (3, 9)
 DEFAULT_MAX_DIFF_CHARS = 120_000
 MAX_AI_OUTPUT_CHARS = 2_000_000
@@ -34,6 +35,11 @@ ZERO_OID = re.compile(r"^0+$")
 GIT_OID = re.compile(r"^[0-9a-fA-F]{40,64}$")
 SEVERITIES = ("P0", "P1", "P2", "P3")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+DEFAULT_API_URL = "https://api.openai.com/v1"
+DEFAULT_API_KEY_ENV = "OPENAI_API_KEY"
+DEFAULT_MODEL = "gpt-5.3-codex"
+DEFAULT_API_FORMAT = "responses"
+DEFAULT_API_TIMEOUT_SECONDS = 180
 
 GATE_OUTPUT_CONTRACT = """
 
@@ -571,20 +577,7 @@ def load_config(
     trust_project: bool = False,
 ) -> Dict[str, Any]:
     """Merge built-in, user, project, and explicit configuration."""
-    config: Dict[str, Any] = {
-        "provider": "api",
-        "command": [],
-        "max_diff_chars": DEFAULT_MAX_DIFF_CHARS,
-        "language": "zh-CN",
-        "exclude": [],
-        "prompt_file": "",
-        "api_url": "https://api.openai.com/v1",
-        "api_key": "",
-        "api_key_env": "OPENAI_API_KEY",
-        "model": "gpt-5.3-codex",
-        "api_format": "responses",
-        "api_timeout_seconds": 180,
-    }
+    config = built_in_config()
     paths = default_config_paths(repo, trust_project)
     if explicit_path:
         paths.append(resolve_config_file(explicit_path))
@@ -593,6 +586,24 @@ def load_config(
             config.update(read_json(path))
     validate_config(config)
     return config
+
+
+def built_in_config() -> Dict[str, Any]:
+    """Return the default user-facing configuration."""
+    return {
+        "provider": "api",
+        "command": [],
+        "max_diff_chars": DEFAULT_MAX_DIFF_CHARS,
+        "language": "zh-CN",
+        "exclude": [],
+        "prompt_file": "",
+        "api_url": DEFAULT_API_URL,
+        "api_key": "",
+        "api_key_env": DEFAULT_API_KEY_ENV,
+        "model": DEFAULT_MODEL,
+        "api_format": DEFAULT_API_FORMAT,
+        "api_timeout_seconds": DEFAULT_API_TIMEOUT_SECONDS,
+    }
 
 
 def validate_string_list(config: Dict[str, Any], key: str) -> None:
@@ -660,6 +671,151 @@ def validate_config(config: Dict[str, Any]) -> None:
     if not isinstance(config.get("prompt_file"), str):
         raise ReviewError("配置项 prompt_file 必须是字符串")
     validate_api_config(config)
+
+
+def default_user_config_path() -> Path:
+    """Return the platform-specific user configuration path."""
+    return default_config_paths(None, False)[0]
+
+
+def prompt_text(
+    label: str,
+    current: str,
+    input_reader: Callable[[str], str],
+) -> str:
+    """Read one text setting, retaining its current value on blank input."""
+    suffix = f" [{current}]" if current else ""
+    try:
+        answer = input_reader(f"{label}{suffix}: ")
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise ReviewError("配置向导已取消") from exc
+    answer = answer.strip()
+    return current if not answer else answer
+
+
+def prompt_secret(
+    label: str,
+    secret_reader: Callable[[str], str],
+) -> str:
+    """Read a secret without echoing it to the terminal."""
+    try:
+        return secret_reader(label)
+    except (EOFError, KeyboardInterrupt, OSError) as exc:
+        raise ReviewError("无法安全读取 API Key；请在交互终端中重试") from exc
+
+
+def prompt_api_format(
+    current: str,
+    input_reader: Callable[[str], str],
+) -> str:
+    """Read one supported API wire format."""
+    while True:
+        value = prompt_text("API 格式（responses/chat_completions）", current, input_reader)
+        if value in {"responses", "chat_completions"}:
+            return value
+        print("请输入 responses 或 chat_completions。", file=sys.stderr)
+
+
+def prompt_timeout(current: int, input_reader: Callable[[str], str]) -> int:
+    """Read and validate the API timeout in seconds."""
+    while True:
+        value = prompt_text("API 超时秒数（5-600）", str(current), input_reader)
+        try:
+            timeout = int(value)
+        except ValueError:
+            timeout = -1
+        if 5 <= timeout <= 600:
+            return timeout
+        print("请输入 5 到 600 之间的整数。", file=sys.stderr)
+
+
+def write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
+    """Write a user configuration atomically with private file permissions."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", dir=str(path.parent), text=True
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+            if os.name != "nt":
+                os.chmod(temporary_name, stat.S_IRUSR | stat.S_IWUSR)
+            os.replace(temporary_name, path)
+        finally:
+            if os.path.exists(temporary_name):
+                os.unlink(temporary_name)
+    except OSError as exc:
+        raise ReviewError(f"无法写入配置 {path}: {exc}") from exc
+
+
+def configure_api(
+    config_path: Optional[Path] = None,
+    input_reader: Callable[[str], str] = input,
+    secret_reader: Callable[[str], str] = getpass.getpass,
+    require_terminal: bool = True,
+) -> int:
+    """Interactively configure and persist the user's direct API settings."""
+    if require_terminal and (not sys.stdin.isatty() or not sys.stdout.isatty()):
+        raise ReviewError("config api 需要交互终端；请在 PowerShell、CMD 或终端中执行")
+    destination = config_path or default_user_config_path()
+    config = built_in_config()
+    if destination.is_file():
+        config.update(read_json(destination))
+
+    api_url = prompt_text("API URL", config["api_url"], input_reader)
+    model = prompt_text("Model", config["model"], input_reader)
+    current_env = config["api_key_env"]
+    api_key_env = prompt_text("API Key 环境变量（输入 - 禁用）", current_env, input_reader)
+    if api_key_env == "-":
+        api_key_env = ""
+    current_key = config["api_key"]
+    entered_key = prompt_secret("API Key（留空保留当前值，输入 - 清除）: ", secret_reader)
+    if entered_key == "-":
+        api_key_value = ""
+    elif entered_key:
+        api_key_value = entered_key
+    else:
+        api_key_value = current_key
+    api_format = prompt_api_format(config["api_format"], input_reader)
+    timeout = prompt_timeout(config["api_timeout_seconds"], input_reader)
+
+    config.update(
+        {
+            "provider": "api",
+            "api_url": api_url,
+            "api_key_env": api_key_env,
+            "api_key": api_key_value,
+            "model": model,
+            "api_format": api_format,
+            "api_timeout_seconds": timeout,
+        }
+    )
+    validate_config(config)
+    write_json_atomic(destination, config)
+    if api_key_env:
+        key_detail = f"环境变量 {api_key_env}（优先于配置文件）"
+    elif api_key_value:
+        key_detail = "配置文件 api_key"
+    else:
+        key_detail = "未设置（本机回环服务可不需要 Key）"
+    print(f"API 配置已写入: {destination}")
+    print(f"provider=api, model={model}, format={api_format}, key={key_detail}")
+    print("下一步可执行: ai-review --doctor")
+    return 0
+
+
+def run_config_command(arguments: Sequence[str]) -> int:
+    """Dispatch the top-level config command without changing path semantics."""
+    parser = argparse.ArgumentParser(prog="ai-review config", description="配置 ai-review")
+    subparsers = parser.add_subparsers(dest="config_target", required=True)
+    api_parser = subparsers.add_parser("api", help="逐项配置直连 API")
+    api_parser.add_argument("--config-path", help="覆盖默认用户配置路径")
+    parsed = parser.parse_args(list(arguments))
+    if parsed.config_target == "api":
+        path = Path(parsed.config_path).expanduser() if parsed.config_path else None
+        return configure_api(config_path=path)
+    raise ReviewError(f"不支持的配置目标: {parsed.config_target}")
 
 
 def prompt_candidates() -> List[Path]:
@@ -1487,8 +1643,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if sys.version_info < MIN_PYTHON:
         print("ai-review 需要 Python 3.9 或更高版本", file=sys.stderr)
         return 2
+    raw_arguments = list(sys.argv[1:] if argv is None else argv)
+    if raw_arguments and raw_arguments[0] == "config":
+        try:
+            return run_config_command(raw_arguments[1:])
+        except ReviewError as exc:
+            print(f"错误: {exc}", file=sys.stderr)
+            return 2
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_arguments)
     try:
         target = resolve_target(args.path)
         if args.doctor:

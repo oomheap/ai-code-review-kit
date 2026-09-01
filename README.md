@@ -320,6 +320,20 @@ chmod 600 ~/.config/ai-code-review/config.json
 
 `api_key_env` 对应的环境变量优先于 `api_key`。不要把 Key 写入仓库的 `.ai-review.json`。完整示例见 [examples/direct-api.json](examples/direct-api.json)。
 
+初次配置也可以直接运行交互式向导，工具会逐项询问并写入当前用户配置文件：
+
+```sh
+ai-review config api
+```
+
+向导会依次配置 API URL、Model、API Key 环境变量、API Key、API 格式和超时秒数，并自动设置 `provider=api`。文本项直接回车保留当前值；API Key 输入不会回显，留空保留已有值，输入 `-` 清除。默认写入路径为 macOS/Linux 的 `~/.config/ai-code-review/config.json`，Windows 的 `%APPDATA%\AiCodeReview\config.json`。
+
+如需写入其他受控位置，可使用：
+
+```sh
+ai-review config api --config-path /path/to/review-config.json
+```
+
 ### 方案三：其他 AI CLI
 
 其他 AI CLI 必须能从标准输入接收完整提示，并把最终回答写到标准输出。把它配置为参数数组，工具不会通过 shell 拼接命令：
@@ -506,6 +520,8 @@ ai-review --provider codex
 ```
 
 默认配置见 [config/default.json](config/default.json)，直连 API 示例见 [examples/direct-api.json](examples/direct-api.json)，自定义执行器示例见 [examples/custom-command.json](examples/custom-command.json)。
+
+也可以使用 `ai-review config api` 交互式生成或更新用户级 API 配置；它会保留已有的排除规则、提示模板和其他字段。
 
 加载可信项目配置：
 

@@ -505,6 +505,46 @@ class UnitTestCase(unittest.TestCase):
         self.assertEqual(ai_review.choose_provider(None, False, config), "api")
 
     @unittest.skipIf(os.name == "nt", "POSIX permission bits are not authoritative on Windows")
+    def test_config_api_wizard_writes_user_config_and_preserves_fields(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = Path(temporary) / "config.json"
+            config_path.write_text(
+                json.dumps({"exclude": ["generated/**"], "language": "en-US"}),
+                encoding="utf-8",
+            )
+            answers = iter(
+                [
+                    "https://review.example.test/v1",
+                    "review-model",
+                    "REVIEW_API_KEY",
+                    "chat_completions",
+                    "45",
+                ]
+            )
+            secrets = iter(["new-secret-value"])
+
+            result = ai_review.configure_api(
+                config_path=config_path,
+                input_reader=lambda _prompt: next(answers),
+                secret_reader=lambda _prompt: next(secrets),
+                require_terminal=False,
+            )
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            permissions = config_path.stat().st_mode & 0o777
+
+        self.assertEqual(result, 0)
+        self.assertEqual(saved["provider"], "api")
+        self.assertEqual(saved["api_url"], "https://review.example.test/v1")
+        self.assertEqual(saved["api_key_env"], "REVIEW_API_KEY")
+        self.assertEqual(saved["api_key"], "new-secret-value")
+        self.assertEqual(saved["model"], "review-model")
+        self.assertEqual(saved["api_format"], "chat_completions")
+        self.assertEqual(saved["api_timeout_seconds"], 45)
+        self.assertEqual(saved["exclude"], ["generated/**"])
+        self.assertEqual(saved["language"], "en-US")
+        self.assertEqual(permissions, 0o600)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits are not authoritative on Windows")
     def test_config_with_inline_api_key_requires_private_permissions(self):
         with tempfile.TemporaryDirectory() as temporary:
             config_path = Path(temporary) / "api.json"

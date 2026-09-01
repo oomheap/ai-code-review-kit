@@ -58,6 +58,7 @@ install.sh / install.ps1
 
 - **在线引导层**：`install-online.sh` 和 `install-online.ps1` 从固定 GitHub 仓库/ref 下载最小载荷，校验 ref 与文件非空后调用本地安装器；
 - **安装层**：`install.sh` 负责 macOS/Linux，`install.cmd`/`install.ps1` 负责 Windows；将脚本和数据复制到用户目录，并创建平台入口；
+- **配置层**：`ai-review config api` 通过交互式向导更新用户级 API 配置，密钥输入不回显并以原子方式写入；
 - **Git 采集层**：只通过参数数组调用 Git，手动模式支持 `working`、`staged`、`commit`、`base`；`pre-push` 解析 Git 标准输入中的 ref 更新并审查精确前后对象；
 - **过滤层**：按默认规则和项目配置排除文件，对未跟踪文件执行路径、符号链接、大小、二进制与 UTF-8 检查；
 - **脱敏层**：在最终 diff 上替换常见密钥赋值、令牌和私钥块，并施加最大字符数；
@@ -224,6 +225,14 @@ install.sh / install.ps1
 **变更理由**：避免 Windows 终端注入的临时 `codex` shim 被 `provider=auto` 误选，确保未指定参数的手动审查与 API 配置一致。
 
 **影响范围**：默认配置、provider 选择、README、测试和首次使用体验；未配置 API 凭据时需先设置 `OPENAI_API_KEY` 或改用显式 Codex/command provider。
+
+### 2026-09-01 - 新增 `config api` 交互式向导
+
+**变更内容**：新增 `ai-review config api` 和 `--config-path`，逐项配置 API URL、Key、模型、协议与超时，并保留既有非 API 配置。
+
+**变更理由**：降低 Windows 和其他没有 Codex CLI 环境的首次配置门槛，避免用户手工编辑 JSON 时误配字段或泄漏 Key。
+
+**影响范围**：CLI 命令解析、用户配置写入、安全权限、README 和测试；向导默认写入用户级配置，不修改仓库文件。
 
 ### 2026-09-01 - 私有仓库在线安装
 
