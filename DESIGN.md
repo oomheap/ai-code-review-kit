@@ -101,6 +101,7 @@ install.sh / install.ps1
 | 2026-09-01 | API Key 环境变量优先 | 避免密钥进入 JSON、Git 和安装载荷 | GUI Git 客户端必须继承对应用户环境变量 |
 | 2026-09-01 | 远程 API 强制 HTTPS 且禁用重定向 | 防止代码与 Bearer Key 经明文或跨主机跳转泄漏 | HTTP 仅允许本机回环服务 |
 | 2026-09-01 | POSIX 内联 Key 配置必须为 600 | 仍满足用户直接配置 Key 的需求，同时限制同机其他用户读取 | Windows 文件 ACL 需要用户自行管理 |
+| 2026-09-01 | 默认 provider 改为直连 API | `ai-review --scope staged` 不再因 PATH 中存在 Codex shim 而意外切换执行器 | 未配置 API Key/模型时需先完成 API 配置；Codex 需显式选择 |
 
 ### 技术选型
 
@@ -128,6 +129,7 @@ install.sh / install.ps1
 - 直连 API 使用 `Authorization: Bearer`，需要其他认证头、签名或云厂商专属协议的服务应使用自定义 CLI；
 - 兼容服务必须返回标准 Responses `output`/`output_text` 或 Chat Completions `choices[].message.content` 结构；
 - Windows 无法用 POSIX 权限位验证内联 Key 配置，应优先使用环境变量或操作系统凭据管理方式。
+- 默认直连 API 需要用户配置可用的 API Key 环境变量；需要 ChatGPT/Codex 登录凭据时必须显式选择 `provider=codex`。
 
 ### 技术债务
 
@@ -214,6 +216,14 @@ install.sh / install.ps1
 **影响范围**：核心执行层、配置 schema、默认/示例配置、API 安全边界、测试和 README。
 
 **决策依据**：使用 Python 标准库维持零第三方依赖；远程 HTTPS、禁止重定向、响应限长和内联 Key 权限校验降低凭据与代码泄漏风险。
+
+### 2026-09-01 - 默认执行器改为直连 API
+
+**变更内容**：内置默认配置使用 `provider=api` 和 `gpt-5.3-codex`；Codex CLI 保留为显式 provider。
+
+**变更理由**：避免 Windows 终端注入的临时 `codex` shim 被 `provider=auto` 误选，确保未指定参数的手动审查与 API 配置一致。
+
+**影响范围**：默认配置、provider 选择、README、测试和首次使用体验；未配置 API 凭据时需先设置 `OPENAI_API_KEY` 或改用显式 Codex/command provider。
 
 ### 2026-09-01 - 私有仓库在线安装
 

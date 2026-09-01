@@ -32,7 +32,7 @@
 - Git 2.x；
 - 可选的 Codex CLI，或一个能从标准输入读取提示的 AI CLI。
 
-未检测到 AI CLI 时，`auto` 模式会安全回退为输出完整提示。Codex 适配器使用官方文档中的非交互 `codex exec` 标准输入方式，并固定为只读沙箱和临时会话；参见 [Codex CLI 命令参考](https://developers.openai.com/codex/cli/reference)。
+默认执行器是直连 API；未配置有效 API Key 或模型时，`ai-review --doctor` 会明确报告配置问题。显式选择 `provider=auto` 时，工具才会按自定义命令、直连 API、Codex CLI、提示输出的顺序探测。Codex 适配器使用官方文档中的非交互 `codex exec` 标准输入方式，并固定为只读沙箱和临时会话；参见 [Codex CLI 命令参考](https://developers.openai.com/codex/cli/reference)。
 
 ## GitHub 在线一键安装
 
@@ -182,7 +182,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 ## 配置 AI
 
-### 方案一：Codex CLI（推荐）
+### 方案一：Codex CLI（可选）
 
 `ai-review` 内置 Codex 适配器，不需要在本工具的 JSON 配置中保存 API Key。先确认 Codex 可用：
 
@@ -212,7 +212,9 @@ codex login status
 codex exec --ephemeral --sandbox read-only -C <repository> -
 ```
 
-完成登录后，在任意 Git 仓库执行 `ai-review` 即可。官方登录方式参见 [Codex Authentication](https://developers.openai.com/codex/auth)，非交互参数参见 [Codex CLI Reference](https://developers.openai.com/codex/cli/reference)。
+完成登录后，在任意 Git 仓库执行 `ai-review --provider codex` 即可。官方登录方式参见 [Codex Authentication](https://developers.openai.com/codex/auth)，非交互参数参见 [Codex CLI Reference](https://developers.openai.com/codex/cli/reference)。
+
+本工具默认使用直连 API；需要使用 Codex CLI 时，请显式添加 `--provider codex`，或在配置文件中设置 `"provider": "codex"`。
 
 确认手动审查可用后，为当前仓库安装门禁：
 
@@ -261,7 +263,7 @@ codex exec --model "<model-name>" "只回答 OK"
 }
 ```
 
-### 方案二：直接配置 API Key、API URL 和 Model
+### 方案二：直接配置 API Key、API URL 和 Model（默认）
 
 此方式不依赖 Codex CLI，仅使用 Python 标准库调用 OpenAI Responses API 或 OpenAI-compatible Chat Completions。
 
@@ -436,11 +438,13 @@ ai-review --prompt-only --output review-prompt.md
 ai-review /path/to/repository
 ```
 
-默认 `provider=auto` 的选择顺序为：配置的自定义命令、已配置 model 的直连 API、Codex CLI、输出提示。若要强制使用 Codex：
+默认 `provider=api`，使用配置中的 `api_url`、`api_key_env` 和 `model`。如果希望恢复自动探测，可显式设置 `provider=auto`；自动顺序为自定义命令、已配置 model 的直连 API、Codex CLI、输出提示。若要强制使用 Codex：
 
 ```sh
 ai-review --provider codex
 ```
+
+如果现有用户配置中已经显式写了 `"provider": "auto"`，它会继续按自动探测执行；删除该字段或改为 `"provider": "api"` 后才会采用新的 API 默认行为。
 
 “输出提示”只适用于手动审查；Git 门禁不能等待用户把提示复制到网页，因此 `auto` 找不到可执行 AI 时会阻断 Git 操作。
 
@@ -469,12 +473,12 @@ ai-review --provider codex
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `provider` | 字符串 | `auto` | `auto`、`api`、`codex`、`command` 或 `prompt` |
+| `provider` | 字符串 | `api` | `api`、`auto`、`codex`、`command` 或 `prompt` |
 | `command` | 字符串数组 | `[]` | 自定义 AI CLI 及参数；提示从标准输入传入 |
 | `api_url` | 字符串 | `https://api.openai.com/v1` | API 基础地址或完整 endpoint；远程必须 HTTPS |
 | `api_key_env` | 字符串 | `OPENAI_API_KEY` | 保存 API Key 的环境变量名 |
 | `api_key` | 字符串 | 空 | 直接保存的 API Key；不推荐，POSIX 文件权限必须为 600 |
-| `model` | 字符串 | 空 | 直连 API 使用的模型 ID；`provider=api` 时必填 |
+| `model` | 字符串 | `gpt-5.3-codex` | 直连 API 使用的模型 ID；`provider=api` 时必填 |
 | `api_format` | 字符串 | `responses` | `responses` 或 `chat_completions` |
 | `api_timeout_seconds` | 整数 | `180` | API 请求超时，范围 5–600 秒 |
 | `max_diff_chars` | 整数 | `120000` | 最多进入提示的 diff 字符数，范围 1000–2000000 |
@@ -486,12 +490,12 @@ ai-review --provider codex
 
 ```json
 {
-  "provider": "auto",
+  "provider": "api",
   "command": [],
   "api_url": "https://api.openai.com/v1",
   "api_key": "",
   "api_key_env": "OPENAI_API_KEY",
-  "model": "",
+  "model": "gpt-5.3-codex",
   "api_format": "responses",
   "api_timeout_seconds": 180,
   "max_diff_chars": 120000,

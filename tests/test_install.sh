@@ -16,7 +16,7 @@ test -x "$TEST_ROOT/bin files/ai-review"
 test -f "$TEST_ROOT/data files/prompts/review.md"
 test -f "$TEST_ROOT/data files/config/default.json"
 test -f "$TEST_ROOT/bin files/ai-review-data/prompts/review.md"
-"$TEST_ROOT/bin files/ai-review" --version | grep 'ai-review 1.2.0' >/dev/null
+"$TEST_ROOT/bin files/ai-review" --version | grep 'ai-review 1.3.0' >/dev/null
 
 mkdir "$TEST_ROOT/repository"
 git -C "$TEST_ROOT/repository" init -q

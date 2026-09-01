@@ -453,7 +453,8 @@ class UnitTestCase(unittest.TestCase):
             default_config = ai_review.load_config(repo, None)
             trusted_config = ai_review.load_config(repo, None, trust_project=True)
 
-        self.assertEqual(default_config["provider"], "auto")
+        self.assertEqual(default_config["provider"], "api")
+        self.assertEqual(default_config["model"], "gpt-5.3-codex")
         self.assertEqual(default_config["command"], [])
         self.assertEqual(trusted_config["command"], ["untrusted-command"])
 
@@ -491,6 +492,17 @@ class UnitTestCase(unittest.TestCase):
     def test_default_config_is_valid(self):
         config = json.loads((ROOT / "config" / "default.json").read_text(encoding="utf-8"))
         ai_review.validate_config(config)
+        self.assertEqual(config["provider"], "api")
+        self.assertEqual(config["model"], "gpt-5.3-codex")
+
+    def test_default_provider_selects_direct_api(self):
+        config = {
+            "provider": "api",
+            "command": [],
+            "model": "gpt-5.3-codex",
+        }
+
+        self.assertEqual(ai_review.choose_provider(None, False, config), "api")
 
     @unittest.skipIf(os.name == "nt", "POSIX permission bits are not authoritative on Windows")
     def test_config_with_inline_api_key_requires_private_permissions(self):

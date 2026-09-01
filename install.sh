@@ -63,7 +63,7 @@ cp "$SCRIPT_DIR/src/ai_review.py" "$BIN_DIR/ai-review"
 cp "$SCRIPT_DIR/prompts/review.md" "$BIN_DIR/ai-review-data/prompts/review.md"
 chmod 0755 "$BIN_DIR/ai-review"
 
-printf 'Installed ai-review %s to %s\n' "1.2.0" "$BIN_DIR/ai-review"
+printf 'Installed ai-review %s to %s\n' "1.3.0" "$BIN_DIR/ai-review"
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *)

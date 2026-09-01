@@ -74,7 +74,7 @@ if ($AddToPath) {
     }
 }
 
-Write-Host "Installed ai-review 1.2.0 to $(Join-Path $BinDir 'ai-review.cmd')"
+Write-Host "Installed ai-review 1.3.0 to $(Join-Path $BinDir 'ai-review.cmd')"
 if (-not $AddToPath) {
     Write-Host "Add $BinDir to PATH, or reinstall with -AddToPath."
 }

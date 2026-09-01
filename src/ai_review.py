@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 MIN_PYTHON = (3, 9)
 DEFAULT_MAX_DIFF_CHARS = 120_000
 MAX_AI_OUTPUT_CHARS = 2_000_000
@@ -572,7 +572,7 @@ def load_config(
 ) -> Dict[str, Any]:
     """Merge built-in, user, project, and explicit configuration."""
     config: Dict[str, Any] = {
-        "provider": "auto",
+        "provider": "api",
         "command": [],
         "max_diff_chars": DEFAULT_MAX_DIFF_CHARS,
         "language": "zh-CN",
@@ -581,7 +581,7 @@ def load_config(
         "api_url": "https://api.openai.com/v1",
         "api_key": "",
         "api_key_env": "OPENAI_API_KEY",
-        "model": "",
+        "model": "gpt-5.3-codex",
         "api_format": "responses",
         "api_timeout_seconds": 180,
     }
