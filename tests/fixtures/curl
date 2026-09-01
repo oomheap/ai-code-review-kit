@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+for argument in "$@"; do
+    url=$argument
+done
+
+prefix="https://raw.githubusercontent.com/oomheap/ai-code-review-kit/main/"
+case "$url" in
+    "$prefix"*) relative_path=${url#"$prefix"} ;;
+    *)
+        printf 'Unexpected test URL: %s\n' "$url" >&2
+        exit 1
+        ;;
+esac
+
+source_file="$AI_REVIEW_TEST_SOURCE/$relative_path"
+[ -f "$source_file" ] || {
+    printf 'Missing test payload: %s\n' "$source_file" >&2
+    exit 1
+}
+command cat "$source_file"

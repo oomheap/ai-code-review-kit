@@ -1,0 +1,8 @@
+{
+  "provider": "auto",
+  "command": [],
+  "max_diff_chars": 120000,
+  "language": "zh-CN",
+  "exclude": [],
+  "prompt_file": ""
+}

@@ -1,0 +1,16 @@
+{
+  "provider": "command",
+  "command": [
+    "your-ai-cli",
+    "--read-prompt-from-stdin",
+    "--repository",
+    "{repo}"
+  ],
+  "max_diff_chars": 80000,
+  "language": "zh-CN",
+  "exclude": [
+    "generated/**",
+    "fixtures/large/**"
+  ],
+  "prompt_file": "prompts/team-review.md"
+}
