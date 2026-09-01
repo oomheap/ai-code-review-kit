@@ -47,6 +47,20 @@ class RepositoryTestCase(unittest.TestCase):
             capture_output=True,
         )
 
+    def ai_config(self, response):
+        config = self.repo / "test-runner.json"
+        runner_code = f"print({response!r})"
+        config.write_text(
+            json.dumps(
+                {
+                    "provider": "command",
+                    "command": [sys.executable, "-c", runner_code],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return config
+
     def test_working_scope_includes_untracked_and_redacts_secrets(self):
         (self.repo / "app.py").write_text(
             'def answer():\n    password = "do-not-send-this-value"\n    return 42\n',
@@ -147,6 +161,145 @@ class RepositoryTestCase(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("没有可审查", result.stderr)
 
+    def test_pre_commit_gate_allows_clean_structured_review(self):
+        (self.repo / "app.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+        self.git("add", "app.py")
+        config = self.ai_config('{"summary":"通过","findings":[]}')
+
+        result = self.cli("--config", str(config), "--hook", "pre-commit")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("AI 审查结论: 通过", result.stderr)
+        self.assertIn("AI 未发现", result.stderr)
+
+    def test_pre_commit_gate_fails_closed_for_malformed_ai_output(self):
+        (self.repo / "app.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+        self.git("add", "app.py")
+        config = self.ai_config("not-json")
+
+        result = self.cli("--config", str(config), "--hook", "pre-commit")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("不是有效的纯 JSON", result.stderr)
+
+    def test_pre_push_gate_reviews_exact_ref_range(self):
+        old_head = self.git("rev-parse", "HEAD").stdout.strip()
+        (self.repo / "app.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+        self.git("add", "app.py")
+        self.git("commit", "-q", "-m", "answer 42")
+        new_head = self.git("rev-parse", "HEAD").stdout.strip()
+        config = self.ai_config('{"summary":"push 通过","findings":[]}')
+        update = f"refs/heads/main {new_head} refs/heads/main {old_head}\n"
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                str(self.repo),
+                "--config",
+                str(config),
+                "--hook",
+                "pre-push",
+                "--hook-remote",
+                "origin",
+            ],
+            cwd=self.repo,
+            input=update,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("push 通过", result.stderr)
+
+    def test_hook_install_chains_and_restores_existing_hook(self):
+        hooks = self.repo / ".git" / "hooks"
+        original = hooks / "pre-commit"
+        original.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        original.chmod(0o755)
+
+        installed = self.cli("--install-hooks")
+
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertIn(ai_review.HOOK_MARKER, original.read_text(encoding="utf-8"))
+        backup = hooks / f"pre-commit{ai_review.HOOK_BACKUP_SUFFIX}"
+        self.assertEqual(backup.read_text(encoding="utf-8"), "#!/bin/sh\nexit 0\n")
+        pre_push = (hooks / "pre-push").read_text(encoding="utf-8")
+        self.assertIn("mktemp", pre_push)
+        self.assertIn("hook-remote", pre_push)
+
+        installed_again = self.cli("--install-hooks")
+        self.assertEqual(installed_again.returncode, 0, installed_again.stderr)
+        self.assertEqual(backup.read_text(encoding="utf-8"), "#!/bin/sh\nexit 0\n")
+
+        uninstalled = self.cli("--uninstall-hooks")
+
+        self.assertEqual(uninstalled.returncode, 0, uninstalled.stderr)
+        self.assertEqual(original.read_text(encoding="utf-8"), "#!/bin/sh\nexit 0\n")
+        self.assertFalse(backup.exists())
+        self.assertFalse((hooks / "pre-push").exists())
+
+    def test_installed_pre_commit_hook_blocks_until_ai_succeeds(self):
+        config = self.ai_config('{"summary":"hook 通过","findings":[]}')
+        installed = self.cli(
+            "--config",
+            str(config),
+            "--install-hooks",
+            "--hooks",
+            "pre-commit",
+        )
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        (self.repo / "app.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+        self.git("add", "app.py")
+
+        committed = subprocess.run(
+            ["git", "commit", "-m", "reviewed change"],
+            cwd=self.repo,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(committed.returncode, 0, committed.stderr)
+        self.assertIn("AI 审查结论: hook 通过", committed.stderr)
+
+    def test_installed_pre_push_hook_reviews_new_remote_branch(self):
+        config = self.ai_config('{"summary":"remote push 通过","findings":[]}')
+        installed = self.cli(
+            "--config",
+            str(config),
+            "--install-hooks",
+            "--hooks",
+            "pre-push",
+        )
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        remote_temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(remote_temporary.cleanup)
+        remote = Path(remote_temporary.name) / "remote.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        self.git("remote", "add", "origin", str(remote))
+
+        pushed = subprocess.run(
+            ["git", "push", "-u", "origin", "main"],
+            cwd=self.repo,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        self.assertIn("AI 审查结论: remote push 通过", pushed.stderr)
+
+    def test_hook_install_refuses_custom_hooks_path(self):
+        self.git("config", "core.hooksPath", ".shared-hooks")
+
+        result = self.cli("--install-hooks")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("core.hooksPath", result.stderr)
+        self.assertFalse((self.repo / ".shared-hooks").exists())
+
 
 class UnitTestCase(unittest.TestCase):
     def test_project_config_requires_explicit_trust(self):
@@ -196,6 +349,38 @@ class UnitTestCase(unittest.TestCase):
     def test_default_config_is_valid(self):
         config = json.loads((ROOT / "config" / "default.json").read_text(encoding="utf-8"))
         ai_review.validate_config(config)
+
+    def test_structured_findings_are_normalized_and_sorted(self):
+        result = ai_review.parse_gate_review(
+            "```json\n"
+            '{"summary":"2 risks","findings":['
+            '{"id":"R2","severity":"p3","category":"performance","file":"a.py",'
+            '"line":"7","title":"slow","evidence":"loop","recommendation":"cache"},'
+            '{"id":"R1","severity":"P0","category":"security","file":"b.py",'
+            '"line":null,"title":"injection","evidence":"raw SQL","recommendation":"bind"}'
+            "]}\n```"
+        )
+
+        self.assertEqual([item.identifier for item in result.findings], ["R1", "R2"])
+        self.assertEqual(result.findings[1].line, 7)
+
+    def test_each_finding_and_final_gate_require_confirmation(self):
+        findings = [
+            ai_review.Finding("R1", "P1", "bug", "a.py", 3, "one", "why", "fix"),
+            ai_review.Finding("R2", "P2", "security", "b.py", None, "two", "why", "fix"),
+        ]
+        answers = iter(["a", "m", "CONFIRM"])
+
+        accepted = ai_review.confirm_findings(findings, lambda _prompt: next(answers))
+
+        self.assertTrue(accepted)
+
+    def test_fix_choice_blocks_gate_immediately(self):
+        finding = ai_review.Finding("R1", "P1", "bug", "a.py", 3, "one", "why", "fix")
+
+        accepted = ai_review.confirm_findings([finding], lambda _prompt: "f")
+
+        self.assertFalse(accepted)
 
 
 if __name__ == "__main__":

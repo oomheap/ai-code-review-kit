@@ -1,6 +1,6 @@
 # AI Code Review Kit
 
-一个可在 macOS、Linux 和 Windows 上安装的 AI 代码审查脚本包。安装后使用统一的 `ai-review` 命令，安全收集 Git 变更、过滤敏感内容、构造审查提示，并调用 AI CLI 或输出提示文本。
+一个可在 macOS、Linux 和 Windows 上安装的 Git AI 提交门禁。安装后使用统一的 `ai-review` 命令，在 `git commit` 前审查暂存区，在 `git push` 前审查实际推送范围；发现 BUG、安全漏洞、可靠性或性能风险时逐条确认，完成最终确认后 Git 才会继续。
 
 ## 为什么需要它
 
@@ -12,9 +12,11 @@
 - 默认排除敏感文件、二进制文件和常见生成目录，并对常见凭据形态二次脱敏；
 - 使用团队可编辑的审查提示模板，限制提示注入影响；
 - 自动调用 Codex CLI，或以不经过 shell 的参数数组接入其他 AI CLI；
+- 安装 `pre-commit` 与 `pre-push` hooks，要求大模型返回结构化风险清单；
+- 对每条风险选择“接受”“误报”或“停止修复”，并要求输入 `CONFIRM` 二次确认；
 - 在 macOS、Linux 和 Windows 上安装用户级命令，不要求管理员权限。
 
-本工具不替代人工审批、测试、静态分析或安全扫描，也不会自动修改被审查仓库。
+本工具不替代人工审批、测试、静态分析或安全扫描，也不会自动修改代码或自行执行 commit/push；它只通过 Git hook 的退出码决定当前 Git 操作是否继续。
 
 ## 平台与依赖
 
@@ -42,6 +44,13 @@
 curl -fsSL https://raw.githubusercontent.com/oomheap/ai-code-review-kit/main/install-online.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 ai-review --doctor
+```
+
+安装命令后，还需在每个需要保护的 Git 仓库中单独启用门禁：
+
+```sh
+cd /path/to/your-repository
+ai-review --install-hooks
 ```
 
 自定义安装位置：
@@ -77,6 +86,13 @@ Invoke-WebRequest `
 & $Installer -AddToPath
 Remove-Item $Installer
 ai-review --doctor
+```
+
+然后进入目标仓库启用门禁：
+
+```powershell
+Set-Location C:\path\to\your-repository
+ai-review --install-hooks
 ```
 
 固定版本时可传入 `-Ref <tag>`：
@@ -168,6 +184,15 @@ codex exec --ephemeral --sandbox read-only -C <repository> -
 
 完成登录后，在任意 Git 仓库执行 `ai-review` 即可。官方登录方式参见 [Codex Authentication](https://developers.openai.com/codex/auth)，非交互参数参见 [Codex CLI Reference](https://developers.openai.com/codex/cli/reference)。
 
+确认手动审查可用后，为当前仓库安装门禁：
+
+```sh
+ai-review --provider codex --scope staged
+ai-review --provider codex --install-hooks
+```
+
+第二条命令会把本次明确指定的 `--provider codex` 固化到生成的 hooks 中。若省略 `--provider`，hooks 每次按用户配置的 `provider` 选择执行器。
+
 如需为代码审查固定某个账号已支持的模型，可把 Codex 当作自定义命令配置：
 
 ```json
@@ -182,7 +207,7 @@ codex exec --ephemeral --sandbox read-only -C <repository> -
 
 ### 方案二：其他 AI CLI
 
-其他 AI CLI 必须能从标准输入接收完整提示。把它配置为参数数组，工具不会通过 shell 拼接命令：
+其他 AI CLI 必须能从标准输入接收完整提示，并把最终回答写到标准输出。把它配置为参数数组，工具不会通过 shell 拼接命令：
 
 ```json
 {
@@ -193,6 +218,14 @@ codex exec --ephemeral --sandbox read-only -C <repository> -
 
 AI 服务的 API Key、Base URL 和模型应由对应 CLI 自己管理，不应写进本工具配置。`{repo}` 会在执行时替换为仓库绝对路径。
 
+门禁模式会在提示末尾附加严格 JSON 协议；AI CLI 必须原样输出模型的最终 JSON。如果输出为空、命令失败或 JSON 不符合风险字段约定，Git 会默认阻断。配置完成后执行：
+
+```sh
+ai-review --config /path/to/review-config.json --install-hooks
+```
+
+显式配置文件的绝对路径会写入 hooks，后续 commit/push 无需重复传参。
+
 ### 方案三：任意网页 AI
 
 如果没有本地 AI CLI，可以只生成经过过滤的审查提示，再上传到 ChatGPT、Claude 或其他服务：
@@ -202,6 +235,70 @@ ai-review --prompt-only --output review-prompt.md
 ```
 
 ## 使用方法
+
+### 推荐：启用 commit/push 门禁
+
+先配置并登录 AI，然后在目标 Git 仓库执行一次：
+
+```sh
+# 同时安装 pre-commit 和 pre-push
+ai-review --install-hooks
+
+# 或只安装其中一个
+ai-review --install-hooks --hooks pre-commit
+ai-review --install-hooks --hooks pre-push
+```
+
+之后正常使用 Git，无需改变原命令：
+
+```sh
+git add src tests
+git commit -m "feat: add feature"
+git push
+```
+
+实际流程如下：
+
+```text
+git commit                  git push
+    │                           │
+    ▼                           ▼
+审查暂存区 staged diff      审查本次将推送的 ref 范围
+    └──────────────┬────────────┘
+                   ▼
+       AI 输出 BUG / 安全 / 性能风险 JSON
+                   │
+        ┌──────────┴──────────┐
+        ▼                     ▼
+     无风险                有风险或覆盖不完整
+        │                     │
+     Git 继续          逐条选择 a / m / f
+                              │
+                   全部确认后输入 CONFIRM
+                              │
+                    Git 继续，否则阻断
+```
+
+每条风险的选择含义：
+
+- `a`：已理解触发条件并接受本次风险；
+- `m`：人工判断为误报；
+- `f`：停止当前 Git 操作，修改代码后重试。
+
+所有风险处理完还必须准确输入 `CONFIRM`。默认策略是失败关闭：AI 未配置、调用失败、结果不是合法 JSON，或有风险但当前 IDE/客户端无法提供交互终端时，commit/push 都会失败。无风险时无需人工输入。
+
+差异被截断或有文件因敏感、二进制、排除规则而跳过时，会生成独立的覆盖风险，也必须人工确认。
+
+安装 hooks 时若已有同名 hook，工具会将其保存为 `pre-commit.ai-review-original` 或 `pre-push.ai-review-original`，先运行原 hook，再运行 AI 门禁。重复安装是幂等的。卸载并恢复原 hook：
+
+```sh
+ai-review --uninstall-hooks
+# 也可指定：--hooks pre-commit 或 --hooks pre-push
+```
+
+若仓库配置了 `core.hooksPath`，自动安装会拒绝修改该共享目录，请由维护者手动集成。Git 自带的紧急绕过方式 `git commit --no-verify` / `git push --no-verify` 仍然有效，应只用于已经记录并经团队批准的例外情况。
+
+### 手动审查
 
 在任意 Git 仓库中执行：
 
@@ -231,6 +328,8 @@ ai-review /path/to/repository
 ```sh
 ai-review --provider codex
 ```
+
+“输出提示”只适用于手动审查；Git 门禁不能等待用户把提示复制到网页，因此 `auto` 找不到可执行 AI 时会阻断 Git 操作。
 
 ## 配置文件
 
@@ -283,7 +382,10 @@ ai-review --provider codex
 
 ```sh
 ai-review --trust-project-config
+ai-review --trust-project-config --install-hooks
 ```
+
+第二条命令会把信任选项写入 hooks。启用后，仓库中的配置可以指定本地 AI 命令，因此只应对受控仓库使用。
 
 显式指定其他配置文件：
 
@@ -303,6 +405,9 @@ ai-review --config /path/to/review-config.json
 - Codex 在 `read-only` 沙箱中运行，自定义命令使用 `shell=False` 等价行为；
 - 仓库内 `.ai-review.json` 默认不加载，防止不可信代码指定本地执行命令；
 - 提示模板明确把 diff 标记为不可信数据，降低代码注释中的提示注入风险。
+- 门禁只接受单个结构化 JSON 对象，格式错误和 AI 调用错误默认阻断；
+- AI 风险文本在显示前移除终端控制字符，推送 ref 仍通过 Git 参数数组解析；
+- 已有 hooks 在改名前备份，卸载只删除带本工具标记的 hook，并恢复原文件。
 
 过滤是降低误发概率的防线，不是完备的密钥检测器。运行前仍应确认目标仓库和配置；`--allow-sensitive` 只关闭按文件名的敏感过滤，内容脱敏仍然生效。
 

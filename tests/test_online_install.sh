@@ -14,7 +14,7 @@ AI_REVIEW_REF=main \
 
 test -x "$TEST_ROOT/bin files/ai-review"
 test -f "$TEST_ROOT/bin files/ai-review-data/prompts/review.md"
-"$TEST_ROOT/bin files/ai-review" --version | grep 'ai-review 1.0.0' >/dev/null
+"$TEST_ROOT/bin files/ai-review" --version | grep 'ai-review 1.1.0' >/dev/null
 
 if AI_REVIEW_REF='../unsafe' "$SCRIPT_DIR/install-online.sh" >/dev/null 2>&1; then
     printf '%s\n' "Unsafe ref was unexpectedly accepted" >&2
