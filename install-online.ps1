@@ -1,6 +1,15 @@
 [CmdletBinding()]
 param(
     [string]$Ref = $(if ($env:AI_REVIEW_REF) { $env:AI_REVIEW_REF } else { "main" }),
+    [string]$Token = $(
+        if ($env:GITHUB_TOKEN) {
+            $env:GITHUB_TOKEN
+        } elseif ($env:GH_TOKEN) {
+            $env:GH_TOKEN
+        } else {
+            ""
+        }
+    ),
     [string]$InstallDir,
     [string]$BinDir,
     [switch]$AddToPath
@@ -34,7 +43,21 @@ try {
         $Parent = Split-Path -Parent $Destination
         New-Item -ItemType Directory -Force -Path $Parent | Out-Null
         $UrlPath = $RelativePath.Replace("\", "/")
-        Invoke-WebRequest -UseBasicParsing -Uri "$RawBase/$UrlPath" -OutFile $Destination
+        $RequestArguments = @{
+            UseBasicParsing = $true
+            OutFile = $Destination
+        }
+        if ($Token) {
+            $RequestArguments["Uri"] = "https://api.github.com/repos/$Repository/contents/${UrlPath}?ref=$Ref"
+            $RequestArguments["Headers"] = @{
+                Authorization = "Bearer $Token"
+                Accept = "application/vnd.github.raw+json"
+                "X-GitHub-Api-Version" = "2022-11-28"
+            }
+        } else {
+            $RequestArguments["Uri"] = "$RawBase/$UrlPath"
+        }
+        Invoke-WebRequest @RequestArguments
         if (-not (Test-Path -LiteralPath $Destination -PathType Leaf)) {
             throw "Download failed: $RelativePath"
         }

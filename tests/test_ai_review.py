@@ -342,6 +342,8 @@ class UnitTestCase(unittest.TestCase):
         self.assertNotIn("cmd /c", combined.lower())
         self.assertIn("Copy-Item", installer)
         self.assertIn("Invoke-WebRequest", online_installer)
+        self.assertIn("Authorization", online_installer)
+        self.assertIn("GITHUB_TOKEN", online_installer)
         self.assertIn("^[A-Za-z0-9._-]+$", online_installer)
         self.assertIn("-ExecutionPolicy Bypass", installer_cmd)
         self.assertIn("@args", shim)

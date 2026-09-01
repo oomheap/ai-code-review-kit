@@ -1,13 +1,35 @@
 #!/bin/sh
 set -eu
 
+config_file=""
+previous=""
 for argument in "$@"; do
+    if [ "$previous" = "--config" ]; then
+        config_file=$argument
+    fi
+    previous=$argument
     url=$argument
 done
 
-prefix="https://raw.githubusercontent.com/oomheap/ai-code-review-kit/main/"
+if [ "${AI_REVIEW_EXPECT_AUTH:-}" = "1" ]; then
+    [ -n "$config_file" ] && [ -f "$config_file" ] || {
+        printf '%s\n' "Expected a curl authentication config" >&2
+        exit 1
+    }
+    grep 'Authorization: Bearer github_pat_test_123' "$config_file" >/dev/null || {
+        printf '%s\n' "Missing expected authorization header" >&2
+        exit 1
+    }
+fi
+
+raw_prefix="https://raw.githubusercontent.com/oomheap/ai-code-review-kit/main/"
+api_prefix="https://api.github.com/repos/oomheap/ai-code-review-kit/contents/"
 case "$url" in
-    "$prefix"*) relative_path=${url#"$prefix"} ;;
+    "$raw_prefix"*) relative_path=${url#"$raw_prefix"} ;;
+    "$api_prefix"*)
+        relative_path=${url#"$api_prefix"}
+        relative_path=${relative_path%\?ref=main}
+        ;;
     *)
         printf 'Unexpected test URL: %s\n' "$url" >&2
         exit 1

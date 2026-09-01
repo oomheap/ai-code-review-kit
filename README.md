@@ -36,7 +36,7 @@
 
 ## GitHub 在线一键安装
 
-在线安装器会通过 HTTPS 从当前仓库下载最小安装载荷，再调用本地安装器。匿名在线安装要求 GitHub 仓库及目标分支/标签可公开读取；私有仓库请先认证后克隆，再使用下方“从源码安装”。
+在线安装器会通过 HTTPS 从当前仓库下载最小安装载荷，再调用本地安装器。公开仓库可匿名安装；私有仓库设置 `GITHUB_TOKEN` 或 `GH_TOKEN` 后，安装器会改用 GitHub Contents API 下载。令牌只需对该仓库拥有 Contents: read 权限，不要把令牌写入仓库或脚本。
 
 ### macOS / Linux
 
@@ -45,6 +45,18 @@ curl -fsSL https://raw.githubusercontent.com/oomheap/ai-code-review-kit/main/ins
 export PATH="$HOME/.local/bin:$PATH"
 ai-review --doctor
 ```
+
+当前仓库为私有仓库时，首次下载安装器本身也需要认证。先由终端的安全凭据管理方式设置环境变量，再执行：
+
+```sh
+{
+  printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN"
+  printf '%s\n' 'header = "Accept: application/vnd.github.raw+json"'
+} | curl --config - -fsSL \
+  "https://api.github.com/repos/oomheap/ai-code-review-kit/contents/install-online.sh?ref=main" | sh
+```
+
+令牌经 curl 标准输入传递，不会出现在 curl 进程参数中；管道中的安装器会继承 `GITHUB_TOKEN`，继续认证下载其他载荷。安装完成后可执行 `unset GITHUB_TOKEN`；不要直接把真实令牌粘贴进会被保存的命令历史。
 
 安装命令后，还需在每个需要保护的 Git 仓库中单独启用门禁：
 
@@ -87,6 +99,24 @@ Invoke-WebRequest `
 Remove-Item $Installer
 ai-review --doctor
 ```
+
+私有仓库的 PowerShell 安装方式：
+
+```powershell
+$Headers = @{
+  Authorization = "Bearer $env:GITHUB_TOKEN"
+  Accept = "application/vnd.github.raw+json"
+  "X-GitHub-Api-Version" = "2022-11-28"
+}
+$Installer = Join-Path $env:TEMP "install-ai-review.ps1"
+Invoke-WebRequest `
+  "https://api.github.com/repos/oomheap/ai-code-review-kit/contents/install-online.ps1?ref=main" `
+  -Headers $Headers -OutFile $Installer
+& $Installer -AddToPath
+Remove-Item $Installer
+```
+
+在线安装器也接受 `-Token`，默认读取 `$env:GITHUB_TOKEN`，其次读取 `$env:GH_TOKEN`。
 
 然后进入目标仓库启用门禁：
 
@@ -408,6 +438,7 @@ ai-review --config /path/to/review-config.json
 - 门禁只接受单个结构化 JSON 对象，格式错误和 AI 调用错误默认阻断；
 - AI 风险文本在显示前移除终端控制字符，推送 ref 仍通过 Git 参数数组解析；
 - 已有 hooks 在改名前备份，卸载只删除带本工具标记的 hook，并恢复原文件。
+- 私有 GitHub 下载令牌不写入安装目录；POSIX 只在权限受限的临时 curl 配置中传递，并随临时目录删除。
 
 过滤是降低误发概率的防线，不是完备的密钥检测器。运行前仍应确认目标仓库和配置；`--allow-sensitive` 只关闭按文件名的敏感过滤，内容脱敏仍然生效。
 
